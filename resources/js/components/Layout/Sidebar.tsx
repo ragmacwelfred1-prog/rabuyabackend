@@ -14,15 +14,27 @@ import {
     MenuUnfoldOutlined,
     GiftOutlined,
     FileTextOutlined,
-    CalendarOutlined,   // ✅ added
+    CalendarOutlined,
+    PushpinOutlined,
+    PushpinFilled,
 } from '@ant-design/icons';
 
 interface SidebarProps {
     collapsed: boolean;
     onToggle: () => void;
+    onMouseEnter?: () => void;
+    onMouseLeave?: () => void;
+    /** If true, the toggle button was clicked and the sidebar is pinned open */
+    pinned?: boolean;
 }
 
-const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
+const Sidebar: React.FC<SidebarProps> = ({
+    collapsed,
+    onToggle,
+    onMouseEnter,
+    onMouseLeave,
+    pinned = false,
+}) => {
     const overviewItems = [
         { key: 'dashboard', icon: <DashboardOutlined />, label: 'Dashboard', path: '/dashboard' },
         { key: 'system-analytics', icon: <BarChartOutlined />, label: 'Analytics', path: '/system-analytics' },
@@ -31,7 +43,7 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
     const managementItems = [
         { key: 'customers', icon: <UserOutlined />, label: 'Customers', path: '/customers' },
         { key: 'parking-remittance', icon: <UserOutlined />, label: 'Parking Remittance', path: '/parking-remittances' },
-        { key: 'parking-calendar', icon: <CalendarOutlined />, label: 'Parking Calendar', path: '/parking-calendar' }, 
+        { key: 'parking-calendar', icon: <CalendarOutlined />, label: 'Parking Calendar', path: '/parking-calendar' },
         { key: 'parking-slots', icon: <CarOutlined />, label: 'Parking Slots', path: '/parking-slots' },
         { key: 'fuel-products', icon: <ShopOutlined />, label: 'Fuel Products', path: '/fuel-products' },
         { key: 'inventory', icon: <InboxOutlined />, label: 'Inventory', path: '/inventory' },
@@ -42,7 +54,11 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
     ];
 
     return (
-        <div className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
+        <div
+            className={`sidebar ${collapsed ? 'collapsed' : ''} ${pinned ? 'pinned' : ''}`}
+            onMouseEnter={onMouseEnter}
+            onMouseLeave={onMouseLeave}
+        >
             <div className="sidebar-header">
                 <div className="sidebar-header-left">
                     <div className="logo-icon">
@@ -50,7 +66,9 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                             src="/images/Rabuya.png"
                             alt="Rabuya Logo"
                             style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                            onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                            }}
                         />
                     </div>
                     {!collapsed && (
@@ -63,20 +81,40 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                 <button
                     className="sidebar-toggle-btn"
                     onClick={onToggle}
-                    aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                    aria-label={
+                        pinned
+                            ? 'Unpin sidebar (auto-collapse on leave)'
+                            : 'Pin sidebar open'
+                    }
+                    title={
+                        pinned
+                            ? 'Unpin sidebar (auto-collapse on leave)'
+                            : 'Pin sidebar open'
+                    }
                 >
-                    {collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                    {pinned ? (
+                        <PushpinFilled />
+                    ) : collapsed ? (
+                        <MenuUnfoldOutlined />
+                    ) : (
+                        <MenuFoldOutlined />
+                    )}
                 </button>
             </div>
 
             <nav className="sidebar-nav">
                 <div className="sidebar-section">
-                    {!collapsed && <div className="sidebar-section-title">Overview</div>}
-                    {overviewItems.map(item => (
+                    {!collapsed && (
+                        <div className="sidebar-section-title">Overview</div>
+                    )}
+                    {overviewItems.map((item) => (
                         <NavLink
                             key={item.key}
                             to={item.path}
-                            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                            className={({ isActive }) =>
+                                `nav-item ${isActive ? 'active' : ''}`
+                            }
+                            title={collapsed ? item.label : undefined}
                         >
                             {item.icon}
                             {!collapsed && <span>{item.label}</span>}
@@ -85,12 +123,17 @@ const Sidebar: React.FC<SidebarProps> = ({ collapsed, onToggle }) => {
                 </div>
 
                 <div className="sidebar-section">
-                    {!collapsed && <div className="sidebar-section-title">Management</div>}
-                    {managementItems.map(item => (
+                    {!collapsed && (
+                        <div className="sidebar-section-title">Management</div>
+                    )}
+                    {managementItems.map((item) => (
                         <NavLink
                             key={item.key}
                             to={item.path}
-                            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                            className={({ isActive }) =>
+                                `nav-item ${isActive ? 'active' : ''}`
+                            }
+                            title={collapsed ? item.label : undefined}
                         >
                             {item.icon}
                             {!collapsed && <span>{item.label}</span>}
