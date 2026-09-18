@@ -87,7 +87,7 @@ const Reports: React.FC = () => {
             return;
         }
         window.print();
-        message.success('Use Ctrl+P to save as PDF');
+        message.success('Choose "Save as PDF" in the print dialog to export');
     };
 
  
@@ -219,8 +219,247 @@ const Reports: React.FC = () => {
         return parkingColumns;
     };
 
+    const reportTypeLabel = reportType === 'parking' ? 'Parking Report' : reportType === 'fuel' ? 'Fuel Report' : 'Combined Report';
+
+    const renderPrintTransactionRow = (t: any) => {
+        if (t.type === 'parking') {
+            const customerName = t.customer ? `${t.customer.first_name} ${t.customer.last_name}` : 'N/A';
+            return (
+                <tr key={t.id}>
+                    <td>{t.transaction_number || 'N/A'}</td>
+                    <td>Parking</td>
+                    <td>{`Slot ${t.slot_number || 'N/A'} — ${customerName}`}</td>
+                    <td>{`${t.nights_stayed || 0} night(s)`}</td>
+                    <td>{t.check_in_date || '-'}</td>
+                    <td className="num">{formatCurrency(t.amount_paid)}</td>
+                    <td className="num">{formatCurrency(t.change_amount)}</td>
+                    <td className="num strong">{formatCurrency(t.total_amount)}</td>
+                </tr>
+            );
+        }
+        return (
+            <tr key={t.id}>
+                <td>{t.transaction_number || 'N/A'}</td>
+                <td>Fuel</td>
+                <td>{t.fuel_product?.type || 'N/A'}</td>
+                <td>{`${formatNumber(t.liters)} L`}</td>
+                <td>{t.date || '-'}</td>
+                <td className="num">{formatCurrency(t.amount_paid)}</td>
+                <td className="num">{formatCurrency(t.change_amount)}</td>
+                <td className="num strong">{formatCurrency(t.total_amount)}</td>
+            </tr>
+        );
+    };
+
     return (
         <div>
+            <style>{`
+                @media print {
+                    body * { visibility: hidden; }
+                    #printable-report, #printable-report * { visibility: visible; }
+                    #printable-report {
+                        display: block !important;
+                        position: absolute;
+                        top: 0;
+                        left: 0;
+                        width: 100%;
+                        margin: 0;
+                        padding: 0;
+                    }
+                    @page { size: A4; margin: 16mm 14mm; }
+                }
+                #printable-report { display: none; }
+                #printable-report .pr-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: flex-start;
+                    border-bottom: 3px solid ${PRIMARY_COLOR};
+                    padding-bottom: 14px;
+                    margin-bottom: 18px;
+                }
+                #printable-report .pr-title {
+                    font-size: 20px;
+                    font-weight: 700;
+                    color: ${TEXT_PRIMARY};
+                    margin: 0 0 4px 0;
+                }
+                #printable-report .pr-subtitle {
+                    font-size: 12px;
+                    color: ${TEXT_SECONDARY};
+                    margin: 0;
+                }
+                #printable-report .pr-meta {
+                    text-align: right;
+                    font-size: 11px;
+                    color: ${TEXT_SECONDARY};
+                }
+                #printable-report .pr-meta strong {
+                    color: ${TEXT_PRIMARY};
+                }
+                #printable-report .pr-summary {
+                    display: grid;
+                    grid-template-columns: repeat(4, 1fr);
+                    gap: 10px;
+                    margin-bottom: 20px;
+                }
+                #printable-report .pr-summary-box {
+                    border: 1px solid #E5E7EB;
+                    border-radius: 4px;
+                    padding: 8px 10px;
+                }
+                #printable-report .pr-summary-label {
+                    font-size: 10px;
+                    text-transform: uppercase;
+                    letter-spacing: 0.03em;
+                    color: ${TEXT_SECONDARY};
+                    margin-bottom: 3px;
+                }
+                #printable-report .pr-summary-value {
+                    font-size: 15px;
+                    font-weight: 700;
+                    color: ${TEXT_PRIMARY};
+                }
+                #printable-report .pr-section-title {
+                    font-size: 13px;
+                    font-weight: 700;
+                    color: ${TEXT_PRIMARY};
+                    margin: 18px 0 8px 0;
+                    padding-bottom: 4px;
+                    border-bottom: 1px solid #E5E7EB;
+                }
+                #printable-report table {
+                    width: 100%;
+                    border-collapse: collapse;
+                    font-size: 10.5px;
+                }
+                #printable-report thead th {
+                    background: #F3F4F6;
+                    color: ${TEXT_PRIMARY};
+                    text-align: left;
+                    font-weight: 700;
+                    padding: 6px 8px;
+                    border-bottom: 2px solid #D1D5DB;
+                }
+                #printable-report tbody td {
+                    padding: 5px 8px;
+                    border-bottom: 1px solid #F0F0F0;
+                    color: ${TEXT_PRIMARY};
+                }
+                #printable-report td.num, #printable-report th.num {
+                    text-align: right;
+                }
+                #printable-report td.strong {
+                    font-weight: 700;
+                    color: ${PRIMARY_COLOR};
+                }
+                #printable-report tbody tr:nth-child(even) {
+                    background: #FAFAFA;
+                }
+                #printable-report .pr-footer {
+                    margin-top: 24px;
+                    padding-top: 10px;
+                    border-top: 1px solid #E5E7EB;
+                    font-size: 9.5px;
+                    color: ${TEXT_SECONDARY};
+                    display: flex;
+                    justify-content: space-between;
+                }
+            `}</style>
+
+            {reportData && (
+                <div id="printable-report">
+                    <div className="pr-header">
+                        <div>
+                            <p className="pr-title">Park &amp; Fuel Management System</p>
+                            <p className="pr-subtitle">{reportTypeLabel}</p>
+                        </div>
+                        <div className="pr-meta">
+                            <div><strong>Period:</strong> {reportData.date_range.start} to {reportData.date_range.end}</div>
+                            <div><strong>Generated:</strong> {dayjs().format('MMMM D, YYYY h:mm A')}</div>
+                        </div>
+                    </div>
+
+                    <div className="pr-summary">
+                        <div className="pr-summary-box">
+                            <div className="pr-summary-label">Total Revenue</div>
+                            <div className="pr-summary-value">{formatCurrency(reportData.summary.total_revenue)}</div>
+                        </div>
+                        <div className="pr-summary-box">
+                            <div className="pr-summary-label">Total Transactions</div>
+                            <div className="pr-summary-value">{formatNumber(reportData.summary.total_transactions)}</div>
+                        </div>
+                        <div className="pr-summary-box">
+                            <div className="pr-summary-label">Average Transaction</div>
+                            <div className="pr-summary-value">{formatCurrency(reportData.summary.average_transaction)}</div>
+                        </div>
+                        <div className="pr-summary-box">
+                            <div className="pr-summary-label">Date Range</div>
+                            <div className="pr-summary-value" style={{ fontSize: 12 }}>{reportData.date_range.start} to {reportData.date_range.end}</div>
+                        </div>
+                    </div>
+
+                    {reportData.summary.parking_revenue !== undefined && (
+                        <div className="pr-summary">
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Parking Revenue</div>
+                                <div className="pr-summary-value">{formatCurrency(reportData.summary.parking_revenue)}</div>
+                            </div>
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Parking Transactions</div>
+                                <div className="pr-summary-value">{formatNumber(reportData.summary.parking_transactions || 0)}</div>
+                            </div>
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Total Nights</div>
+                                <div className="pr-summary-value">{formatNumber(reportData.summary.total_parking_nights || 0)}</div>
+                            </div>
+                            <div className="pr-summary-box" />
+                        </div>
+                    )}
+
+                    {reportData.summary.fuel_revenue !== undefined && (
+                        <div className="pr-summary">
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Fuel Revenue</div>
+                                <div className="pr-summary-value">{formatCurrency(reportData.summary.fuel_revenue)}</div>
+                            </div>
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Fuel Transactions</div>
+                                <div className="pr-summary-value">{formatNumber(reportData.summary.fuel_transactions || 0)}</div>
+                            </div>
+                            <div className="pr-summary-box">
+                                <div className="pr-summary-label">Total Liters Sold</div>
+                                <div className="pr-summary-value">{`${(reportData.summary.total_liters_sold || 0).toFixed(2)} L`}</div>
+                            </div>
+                            <div className="pr-summary-box" />
+                        </div>
+                    )}
+
+                    <div className="pr-section-title">Transaction Details ({getTransactionsForTable().length} records)</div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Transaction #</th>
+                                <th>Type</th>
+                                <th>Details</th>
+                                <th>Quantity</th>
+                                <th>Date</th>
+                                <th className="num">Paid</th>
+                                <th className="num">Change</th>
+                                <th className="num">Amount</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {getTransactionsForTable().map(renderPrintTransactionRow)}
+                        </tbody>
+                    </table>
+
+                    <div className="pr-footer">
+                        <span>Park &amp; Fuel Management System — Generated Report</span>
+                        <span>Page 1</span>
+                    </div>
+                </div>
+            )}
+
             <div className="page-header">
                 <div>
                     <h1 className="page-title"><FileTextOutlined style={{ color: PRIMARY_COLOR, marginRight: 12 }} />Reports</h1>
