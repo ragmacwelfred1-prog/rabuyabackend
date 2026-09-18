@@ -66,8 +66,6 @@ class NotificationController extends Controller
 
     /**
      * Poll for notifications newer than `since_id`.
-     * Lightweight — designed for high-frequency polling.
-     * Supports ETag / 304 Not Modified for efficiency.
      */
     public function poll(Request $request)
     {
@@ -98,7 +96,6 @@ class NotificationController extends Controller
             $latestId = UserNotification::where('user_id', $user->id)
                 ->max('id') ?? 0;
 
-            // ETag for 304 short-circuiting
             $etag = 'W/"' . $user->id . '-' . $latestId . '-' . $unreadCount . '-' . $sinceId . '"';
 
             if ($request->header('If-None-Match') === $etag) {
@@ -148,21 +145,37 @@ class NotificationController extends Controller
     }
 
     /**
-     * Mark notification as read
+     * Mark notification as read — graceful 404 instead of 500.
      */
     public function markAsRead(Request $request, $id)
     {
         try {
+            // Use first() instead of findOrFail() so we can return a clean 404
             $notification = UserNotification::where('user_id', $request->user()->id)
-                ->findOrFail($id);
+                ->where('id', $id)
+                ->first();
 
-            $notification->markAsRead();
+            if (! $notification) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Notification not found or does not belong to you.',
+                ], 404);
+            }
+
+            // Already read? Just confirm (idempotent).
+            if (! $notification->is_read) {
+                $notification->markAsRead();
+            }
 
             return response()->json([
                 'success' => true,
                 'message' => 'Notification marked as read',
             ]);
         } catch (\Exception $e) {
+            Log::error('markAsRead error: ' . $e->getMessage(), [
+                'notification_id' => $id,
+                'user_id'         => $request->user()?->id,
+            ]);
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to mark as read',
@@ -188,6 +201,7 @@ class NotificationController extends Controller
                 'message' => 'All notifications marked as read',
             ]);
         } catch (\Exception $e) {
+            Log::error('markAllAsRead error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to mark all as read',
@@ -196,13 +210,21 @@ class NotificationController extends Controller
     }
 
     /**
-     * Delete a notification
+     * Delete a notification — graceful 404 instead of 500.
      */
     public function destroy(Request $request, $id)
     {
         try {
             $notification = UserNotification::where('user_id', $request->user()->id)
-                ->findOrFail($id);
+                ->where('id', $id)
+                ->first();
+
+            if (! $notification) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Notification not found or already deleted.',
+                ], 404);
+            }
 
             $notification->delete();
 
@@ -211,6 +233,7 @@ class NotificationController extends Controller
                 'message' => 'Notification deleted',
             ]);
         } catch (\Exception $e) {
+            Log::error('destroy notification error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to delete notification',
@@ -231,6 +254,7 @@ class NotificationController extends Controller
                 'message' => 'All notifications deleted',
             ]);
         } catch (\Exception $e) {
+            Log::error('destroyAll notifications error: ' . $e->getMessage());
             return response()->json([
                 'success' => false,
                 'message' => 'Failed to delete all notifications',
