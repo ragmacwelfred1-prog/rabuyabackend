@@ -9,15 +9,12 @@ import {
     Space,
     Spin,
     message,
-    Badge,
     Tooltip,
     Button,
     Select,
     Typography,
     Empty,
-    Alert,
-    Statistic,
-    Divider,
+    Modal,
 } from 'antd';
 import {
     CalendarOutlined,
@@ -33,9 +30,8 @@ import {
     UserOutlined,
     EnvironmentOutlined,
     CheckOutlined,
-    CloseOutlined,
 } from '@ant-design/icons';
-import dayjs, { Dayjs } from 'dayjs';
+import dayjs from 'dayjs';
 import isToday from 'dayjs/plugin/isToday';
 import isBetween from 'dayjs/plugin/isBetween';
 import weekOfYear from 'dayjs/plugin/weekOfYear';
@@ -46,7 +42,7 @@ dayjs.extend(isToday);
 dayjs.extend(isBetween);
 dayjs.extend(weekOfYear);
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const { Option } = Select;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -135,23 +131,12 @@ const STATUS_CONFIG = {
     },
 };
 
-// ─── Helper Functions ─────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-const getStatusConfig = (status: string) => {
-    return (
-        STATUS_CONFIG[status as keyof typeof STATUS_CONFIG] ||
-        STATUS_CONFIG.available
-    );
-};
+const getStatusConfig = (status: string) =>
+    STATUS_CONFIG[status as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.available;
 
-const isTodayDate = (date: string) => {
-    return dayjs(date).isToday();
-};
-
-const isWeekendDate = (date: string) => {
-    const day = dayjs(date).day();
-    return day === 0 || day === 6;
-};
+const isTodayDate = (date: string) => dayjs(date).isToday();
 
 const formatDate = (date: string) => dayjs(date).format('MMMM D, YYYY');
 const formatDayName = (date: string) => dayjs(date).format('dddd');
@@ -165,6 +150,7 @@ const ParkingCalendar: React.FC = () => {
     const [selectedYear, setSelectedYear] = useState(dayjs().year());
     const [selectedSlotId, setSelectedSlotId] = useState<number | null>(null);
     const [selectedDate, setSelectedDate] = useState<string | null>(null);
+    const [detailsOpen, setDetailsOpen] = useState(false);
 
     // ─── Fetch Data ──────────────────────────────────────────────────────────
 
@@ -175,14 +161,11 @@ const ParkingCalendar: React.FC = () => {
                 params: { month: selectedMonth, year: selectedYear },
             });
 
-            console.log('Calendar response:', response.data);
             if (response.data.success) {
                 setCalendarData(response.data);
-                // Auto-select first slot
                 if (response.data.slots.length > 0 && !selectedSlotId) {
                     setSelectedSlotId(response.data.slots[0].id);
                 }
-                // Auto-select today
                 if (!selectedDate) {
                     setSelectedDate(dayjs().format('YYYY-MM-DD'));
                 }
@@ -199,6 +182,7 @@ const ParkingCalendar: React.FC = () => {
 
     useEffect(() => {
         fetchCalendar();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedMonth, selectedYear]);
 
     // ─── Handlers ────────────────────────────────────────────────────────────
@@ -241,9 +225,10 @@ const ParkingCalendar: React.FC = () => {
     const selectedDayStatus = useMemo(() => {
         if (!selectedSlot || !selectedDate || !calendarData) return null;
         return getSlotStatus(selectedSlot.id, selectedDate);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedSlot, selectedDate, calendarData]);
 
-    // ─── Render ─────────────────────────────────────────────────────────────
+    // ─── Loading / Empty states ─────────────────────────────────────────────
 
     if (loading) {
         return (
@@ -262,7 +247,6 @@ const ParkingCalendar: React.FC = () => {
     }
 
     const { slots, days, summary, month_name } = calendarData;
-    const today = dayjs().format('YYYY-MM-DD');
 
     // ─── Table Columns ──────────────────────────────────────────────────────
 
@@ -273,7 +257,7 @@ const ParkingCalendar: React.FC = () => {
             key: 'slot_number',
             fixed: 'left' as const,
             width: 100,
-            render: (text: string, record: Slot) => (
+            render: (text: string) => (
                 <Space>
                     <EnvironmentOutlined style={{ color: 'var(--primary)' }} />
                     <Text strong style={{ color: 'var(--text-primary)' }}>
@@ -282,8 +266,8 @@ const ParkingCalendar: React.FC = () => {
                 </Space>
             ),
             sorter: (a: Slot, b: Slot) => {
-                const numA = parseInt(a.slot_number.replace(/\D/g, ''));
-                const numB = parseInt(b.slot_number.replace(/\D/g, ''));
+                const numA = parseInt(a.slot_number.replace(/\D/g, ''), 10);
+                const numB = parseInt(b.slot_number.replace(/\D/g, ''), 10);
                 return numA - numB;
             },
         },
@@ -292,7 +276,7 @@ const ParkingCalendar: React.FC = () => {
             dataIndex: 'status',
             key: 'status',
             width: 110,
-            render: (status: string, record: Slot) => {
+            render: (status: Slot['status']) => {
                 const config = getStatusConfig(
                     status === 'maintenance' ? 'maintenance' : 'available',
                 );
@@ -382,13 +366,17 @@ const ParkingCalendar: React.FC = () => {
                 const isSelected =
                     selectedSlotId === record.id && selectedDate === day.date;
 
-                // If slot is maintenance, show maintenance indicator
                 if (record.status === 'maintenance') {
                     return (
                         <Tooltip
-                            title={`${record.slot_number}: Under Maintenance`}
+                            title={`${record.slot_number}: Under Maintenance — click for details`}
                         >
                             <div
+                                onClick={() =>
+                                    message.info(
+                                        `${record.slot_number} is under maintenance on ${formatDate(day.date)}.`,
+                                    )
+                                }
                                 style={{
                                     width: 32,
                                     height: 32,
@@ -398,9 +386,9 @@ const ParkingCalendar: React.FC = () => {
                                     justifyContent: 'center',
                                     margin: '0 auto',
                                     background: 'var(--danger-bg)',
-                                    border: `1px solid var(--danger-border)`,
+                                    border: '1px solid var(--danger-border)',
                                     opacity: 0.6,
-                                    cursor: 'default',
+                                    cursor: 'pointer',
                                 }}
                             >
                                 <ExclamationCircleOutlined
@@ -431,25 +419,22 @@ const ParkingCalendar: React.FC = () => {
                                 {status.customer_name && (
                                     <div>👤 {status.customer_name}</div>
                                 )}
-                                {!isAvailable && !isOccupied && (
-                                    <div
-                                        style={{
-                                            fontSize: 11,
-                                            color: '#94A3B8',
-                                        }}
-                                    >
-                                        Click for details
-                                    </div>
-                                )}
+                                <div
+                                    style={{
+                                        fontSize: 11,
+                                        color: '#94A3B8',
+                                    }}
+                                >
+                                    Click to view details
+                                </div>
                             </div>
                         }
                     >
                         <div
                             onClick={() => {
-                                if (record.status !== 'maintenance') {
-                                    setSelectedSlotId(record.id);
-                                    setSelectedDate(day.date);
-                                }
+                                setSelectedSlotId(record.id);
+                                setSelectedDate(day.date);
+                                setDetailsOpen(true);
                             }}
                             style={{
                                 width: 34,
@@ -459,15 +444,12 @@ const ParkingCalendar: React.FC = () => {
                                 alignItems: 'center',
                                 justifyContent: 'center',
                                 margin: '0 auto',
-                                cursor:
-                                    record.status === 'maintenance'
-                                        ? 'default'
-                                        : 'pointer',
+                                cursor: 'pointer',
                                 background: isSelected
                                     ? 'var(--primary)'
                                     : config.bg,
                                 border: isSelected
-                                    ? `2px solid var(--primary)`
+                                    ? '2px solid var(--primary)'
                                     : `1px solid ${isAvailable ? 'var(--success-border)' : config.border}`,
                                 transition: 'all 0.15s ease',
                                 transform: isSelected
@@ -478,10 +460,7 @@ const ParkingCalendar: React.FC = () => {
                                     : 'none',
                             }}
                             onMouseEnter={(e) => {
-                                if (
-                                    !isSelected &&
-                                    record.status !== 'maintenance'
-                                ) {
+                                if (!isSelected) {
                                     e.currentTarget.style.transform =
                                         'scale(1.08)';
                                     e.currentTarget.style.boxShadow =
@@ -522,7 +501,7 @@ const ParkingCalendar: React.FC = () => {
 
     return (
         <div style={{ paddingBottom: 24 }}>
-            {/* ─── HEADER ─────────────────────────────────────────────────────── */}
+            {/* ─── HEADER ─────────────────────────────────────────────────── */}
             <div className="page-header">
                 <div>
                     <h1 className="page-title">
@@ -544,13 +523,20 @@ const ParkingCalendar: React.FC = () => {
                     >
                         Refresh
                     </Button>
-                    <Button type="primary" onClick={goToToday}>
+                    <Button
+                        type="primary"
+                        onClick={goToToday}
+                        disabled={
+                            selectedMonth === dayjs().month() + 1 &&
+                            selectedYear === dayjs().year()
+                        }
+                    >
                         <CalendarOutlined /> Today
                     </Button>
                 </Space>
             </div>
 
-            {/* ─── SUMMARY STATS ────────────────────────────────────────────── */}
+            {/* ─── SUMMARY STATS ────────────────────────────────────────── */}
             <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
                 <Col xs={12} sm={6}>
                     <Card
@@ -724,7 +710,7 @@ const ParkingCalendar: React.FC = () => {
                 </Col>
             </Row>
 
-            {/* ─── LEGEND ────────────────────────────────────────────────────── */}
+            {/* ─── LEGEND ────────────────────────────────────────────────── */}
             <Card
                 size="small"
                 style={{ marginBottom: 16, borderRadius: 10 }}
@@ -818,7 +804,7 @@ const ParkingCalendar: React.FC = () => {
                 </div>
             </Card>
 
-            {/* ─── MONTH NAVIGATION ────────────────────────────────────────── */}
+            {/* ─── MONTH NAVIGATION ──────────────────────────────────────── */}
             <div
                 style={{
                     display: 'flex',
@@ -885,7 +871,7 @@ const ParkingCalendar: React.FC = () => {
                 </Space>
             </div>
 
-            {/* ─── MAIN CALENDAR TABLE ──────────────────────────────────────── */}
+            {/* ─── MAIN CALENDAR TABLE ───────────────────────────────────── */}
             <Card
                 style={{ borderRadius: 12, overflow: 'hidden' }}
                 styles={{ body: { padding: 0 } }}
@@ -911,16 +897,13 @@ const ParkingCalendar: React.FC = () => {
                         },
                     })}
                     summary={() => {
-                        // Calculate available slots per day
+                        // ✅ FIX #1: use ONLY the calendar status, no comparison
+                        // against Slot['status'] — avoids the TS narrowing error.
                         const availablePerDay = days.map((day) => {
                             let count = 0;
                             slots.forEach((slot) => {
                                 const status = getSlotStatus(slot.id, day.date);
-                                if (
-                                    status &&
-                                    status.status === 'available' &&
-                                    slot.status !== 'maintenance'
-                                ) {
+                                if (status && status.status === 'available') {
                                     count++;
                                 }
                             });
@@ -944,9 +927,13 @@ const ParkingCalendar: React.FC = () => {
                                             📊 Available Slots
                                         </span>
                                     </Table.Summary.Cell>
-                                    {availablePerDay.map((day) => (
+                                    {availablePerDay.map((day, i) => (
                                         <Table.Summary.Cell
+                                            // ✅ FIX #2: `index` is required by
+                                            // antd's SummaryCellProps — start at 3
+                                            // because 3 columns are colSpan'd.
                                             key={day.date}
+                                            index={i + 3}
                                             align="center"
                                         >
                                             <Tooltip
@@ -975,11 +962,35 @@ const ParkingCalendar: React.FC = () => {
                 />
             </Card>
 
-            {/* ─── SELECTED DAY DETAILS ────────────────────────────────────── */}
-            {selectedSlot && selectedDate && selectedDayStatus && (
-                <Card style={{ marginTop: 16, borderRadius: 12 }}>
+            {/* ─── DETAILS MODAL ────────────────────────────────────────── */}
+            <Modal
+                open={
+                    detailsOpen &&
+                    !!selectedSlot &&
+                    !!selectedDate &&
+                    !!selectedDayStatus
+                }
+                onCancel={() => setDetailsOpen(false)}
+                footer={null}
+                width={560}
+                centered
+                title={
+                    selectedSlot && selectedDate ? (
+                        <Space>
+                            <EnvironmentOutlined
+                                style={{ color: 'var(--primary)' }}
+                            />
+                            <span>
+                                {selectedSlot.slot_number} —{' '}
+                                {formatDate(selectedDate)}
+                            </span>
+                        </Space>
+                    ) : null
+                }
+            >
+                {selectedSlot && selectedDate && selectedDayStatus && (
                     <Row gutter={[16, 16]} align="middle">
-                        <Col xs={24} sm={4}>
+                        <Col xs={24} sm={12}>
                             <div>
                                 <div
                                     style={{
@@ -1010,7 +1021,7 @@ const ParkingCalendar: React.FC = () => {
                                 </div>
                             </div>
                         </Col>
-                        <Col xs={24} sm={4}>
+                        <Col xs={24} sm={12}>
                             <div>
                                 <div
                                     style={{
@@ -1042,7 +1053,7 @@ const ParkingCalendar: React.FC = () => {
                                 </div>
                             </div>
                         </Col>
-                        <Col xs={24} sm={4}>
+                        <Col xs={24} sm={12}>
                             <div>
                                 <div
                                     style={{
@@ -1084,7 +1095,7 @@ const ParkingCalendar: React.FC = () => {
                                 </Tag>
                             </div>
                         </Col>
-                        <Col xs={24} sm={6}>
+                        <Col xs={24} sm={12}>
                             {selectedDayStatus.customer_name && (
                                 <div>
                                     <div
@@ -1112,20 +1123,22 @@ const ParkingCalendar: React.FC = () => {
                                 </div>
                             )}
                         </Col>
-                        <Col xs={24} sm={6} style={{ textAlign: 'right' }}>
+                        <Col xs={24} style={{ marginTop: 4 }}>
                             {selectedDayStatus.status === 'available' ? (
                                 <Button
                                     type="primary"
                                     icon={<CheckOutlined />}
                                     size="large"
+                                    block
                                 >
-                                    Available - Book Now
+                                    Available — Book Now
                                 </Button>
                             ) : selectedDayStatus.status === 'maintenance' ? (
                                 <Button
                                     disabled
                                     icon={<ExclamationCircleOutlined />}
                                     size="large"
+                                    block
                                 >
                                     Under Maintenance
                                 </Button>
@@ -1134,6 +1147,7 @@ const ParkingCalendar: React.FC = () => {
                                     disabled
                                     icon={<CarOutlined />}
                                     size="large"
+                                    block
                                 >
                                     {selectedDayStatus.status === 'occupied'
                                         ? 'Currently Occupied'
@@ -1142,10 +1156,10 @@ const ParkingCalendar: React.FC = () => {
                             )}
                         </Col>
                     </Row>
-                </Card>
-            )}
+                )}
+            </Modal>
 
-            {/* ─── TIPS ──────────────────────────────────────────────────────── */}
+            {/* ─── TIPS ─────────────────────────────────────────────────── */}
             <Card
                 size="small"
                 style={{
@@ -1165,11 +1179,11 @@ const ParkingCalendar: React.FC = () => {
                 >
                     <InfoCircleOutlined style={{ color: 'var(--info-text)' }} />
                     <span style={{ color: 'var(--info-text)', fontSize: 13 }}>
-                        <strong>💡 Tip:</strong> Click any colored cell to see
-                        details. Green = Available, Blue = Booked, Yellow =
-                        Occupied, Red = Maintenance. The{' '}
-                        <strong>summary row</strong> shows available slots per
-                        day.
+                        <strong>💡 Tip:</strong> Click any colored cell to open
+                        its details in a popup. Green = Available, Blue =
+                        Booked, Yellow = Occupied, Red = Maintenance. The{' '}
+                        <strong>summary row</strong> at the bottom of the
+                        table shows how many slots are free each day.
                     </span>
                 </div>
             </Card>
