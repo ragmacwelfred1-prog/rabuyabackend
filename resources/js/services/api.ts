@@ -2,7 +2,7 @@
 import axios from "axios";
 
 const api = axios.create({
-    baseURL: "rabuyabackend-production.up.railway.app/api",
+    baseURL: "https://rabuyabackend-production.up.railway.app/api",
     headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
