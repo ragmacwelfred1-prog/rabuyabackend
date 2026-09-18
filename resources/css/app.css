@@ -785,6 +785,62 @@ body {
     background: var(--bg-primary);
 }
 
+/* ============================================================
+   SIDEBAR — Hover Expand / Pin Support
+   ============================================================ */
+
+/* Smooth transition when expanding/collapsing */
+.sidebar {
+    transition: width 0.22s ease, box-shadow 0.22s ease;
+    will-change: width;
+}
+
+/* Subtle shadow when the sidebar is expanded (helps focus) */
+.sidebar:not(.collapsed) {
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.06);
+}
+
+[data-theme="dark"] .sidebar:not(.collapsed) {
+    box-shadow: 4px 0 18px rgba(0, 0, 0, 0.4);
+}
+
+/* Pinned sidebar — small visual cue that it's locked open */
+.sidebar.pinned:not(.collapsed) {
+    border-right: 2px solid var(--primary, #10B981);
+}
+
+/* When collapsed, remove labels from view smoothly */
+.sidebar.collapsed .sidebar-section-title,
+.sidebar.collapsed .sidebar-header h2,
+.sidebar.collapsed .sidebar-header p {
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.sidebar .sidebar-section-title,
+.sidebar .sidebar-header h2,
+.sidebar .sidebar-header p {
+    opacity: 1;
+    transition: opacity 0.15s ease 0.05s;
+}
+
+/* Highlight pin button when pinned */
+.sidebar.pinned .sidebar-toggle-btn {
+    color: var(--primary, #10B981);
+    background: var(--primary-bg, rgba(16, 185, 129, 0.12));
+    border-radius: 6px;
+}
+
+.sidebar .sidebar-toggle-btn {
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar .sidebar-toggle-btn:hover {
+    background: var(--bg-surface-hover, rgba(0, 0, 0, 0.06));
+}
+
+/* Tooltips (browser native) only show when collapsed via `title` attr — no CSS needed */
+
 /* ─── RESPONSIVE ───────────────────────────────────────────────────────────── */
 @media (max-width: 768px) {
     .sidebar {
