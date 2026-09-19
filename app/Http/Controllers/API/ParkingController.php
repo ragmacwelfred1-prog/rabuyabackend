@@ -17,6 +17,14 @@ use Carbon\Carbon;
 
 class ParkingController extends Controller
 {
+    // ─── Discount configuration ───────────────────────────────────────────────
+    // Discount only applies when BOTH conditions are met:
+    //   1. Total actual nights stayed >= DISCOUNT_THRESHOLD_NIGHTS
+    //   2. Customer is overdue (stayed past the booked checkout)
+    // When applied, ALL nights are charged at DISCOUNTED_RATE.
+    const DISCOUNT_THRESHOLD_NIGHTS = 6;
+    const DISCOUNTED_RATE           = 180;
+
     // ─── Format helper ────────────────────────────────────────────────────────
 
     private function formatTransaction(ParkingTransaction $t): array
@@ -28,7 +36,7 @@ class ParkingController extends Controller
 
         $promo = $booking->promo;
 
-        $rate = (float) ($slot->nightly_rate ?? 250);
+        $rate = (float) ($slot->nightly_rate ?? 200);
 
         $checkIn          = Carbon::parse($booking->check_in_date);
         $expectedCheckout = Carbon::parse($booking->check_out_date);
@@ -345,8 +353,7 @@ class ParkingController extends Controller
 
             DB::commit();
 
-            // ─── NOTIFICATIONS (persisted — poller picks them up) ────────────
-
+            // ─── NOTIFICATIONS ────────────────────────────────────────────
             $staffUsers = User::whereIn('role', ['admin', 'staff'])->get();
             foreach ($staffUsers as $staff) {
                 NotificationController::createNotification(
@@ -470,8 +477,6 @@ class ParkingController extends Controller
 
     // ─── Check-out ────────────────────────────────────────────────────────────
 
-    const OVERDUE_DISCOUNT_PER_NIGHT = 20;
-
     public function checkOut(Request $request, $id)
     {
         try {
@@ -504,29 +509,33 @@ class ParkingController extends Controller
                 return response()->json(['message' => 'Transaction is already completed'], 422);
             }
 
+            // ─── Compute nights ──────────────────────────────────────────
             $checkIn      = Carbon::parse($transaction->booking->check_in_date)->startOfDay();
+            $expectedOut  = Carbon::parse($transaction->booking->check_out_date)->startOfDay();
             $checkOutNow  = Carbon::now();
-            $actualNights = max(1, $checkIn->diffInDays($checkOutNow->copy()->startOfDay()));
 
-            $ratePerNight = $transaction->booking->parkingSlot->nightly_rate ?? 250;
+            $actualNights   = max(1, $checkIn->diffInDays($checkOutNow->copy()->startOfDay()));
+            $expectedNights = max(1, $checkIn->diffInDays($expectedOut));
 
-            $plannedCheckout = Carbon::parse($transaction->booking->check_out_date)->startOfDay();
-            $expectedNights  = max(1, $checkIn->diffInDays($plannedCheckout));
+            $baseRate = (float) ($transaction->booking->parkingSlot->nightly_rate ?? 200);
+            $isOverdue = $actualNights > $expectedNights;
 
-            $normalNights = min($actualNights, $expectedNights);
-            $extraNights  = max(0, $actualNights - $expectedNights);
+            // ✅ Discount applies ONLY when:
+            //    1. Total actual nights stayed >= 6
+            //    2. Customer is overdue (actual > booked)
+            $discountApplies = ($actualNights >= self::DISCOUNT_THRESHOLD_NIGHTS) && $isOverdue;
 
-            $overdueRate = max(0, $ratePerNight - self::OVERDUE_DISCOUNT_PER_NIGHT);
+            $effectiveRate = $discountApplies ? self::DISCOUNTED_RATE : $baseRate;
+            $totalAmount   = $actualNights * $effectiveRate;
 
-            $totalAmount = ($normalNights * $ratePerNight) + ($extraNights * $overdueRate);
-
-            $promo = $transaction->booking->promo;
+            // ─── Promo / manual discount ─────────────────────────────────
+            $promo         = $transaction->booking->promo;
             $promoDiscount = $promo ? (float) $promo->discount : 0;
-
-            $discount = $request->filled('discount')
+            $discount      = $request->filled('discount')
                 ? (float) $request->discount
                 : $promoDiscount;
 
+            // ─── Downpayment ─────────────────────────────────────────────
             $downpayment     = $transaction->booking->downpayment;
             $downpaymentPaid = ($downpayment && $downpayment->status === 'paid')
                 ? (float) $downpayment->amount_paid
@@ -572,8 +581,7 @@ class ParkingController extends Controller
 
             DB::commit();
 
-            // ─── NOTIFICATIONS (persisted — poller picks them up) ────────────
-
+            // ─── NOTIFICATIONS ───────────────────────────────────────────
             $staffUsers = User::whereIn('role', ['admin', 'staff'])->get();
             foreach ($staffUsers as $staff) {
                 NotificationController::createNotification(
@@ -593,36 +601,41 @@ class ParkingController extends Controller
             }
 
             Log::info('Checkout successful', [
-                'transaction_id'   => $id,
-                'rate_used'        => $ratePerNight,
-                'overdue_rate'     => $overdueRate,
-                'expected_nights'  => $expectedNights,
-                'normal_nights'    => $normalNights,
-                'extra_nights'     => $extraNights,
-                'total_amount'     => $finalAmount,
-                'discount'         => $discount,
-                'downpayment_paid' => $downpaymentPaid,
-                'amount_paid'      => $amountPaid,
-                'change_amount'    => $changeAmount,
-                'nights'           => $actualNights,
-                'promo'            => $promo?->title,
+                'transaction_id'    => $id,
+                'base_rate'         => $baseRate,
+                'effective_rate'    => $effectiveRate,
+                'discount_applied'  => $discountApplies,
+                'is_overdue'        => $isOverdue,
+                'actual_nights'     => $actualNights,
+                'expected_nights'   => $expectedNights,
+                'total_amount'      => $finalAmount,
+                'discount'          => $discount,
+                'downpayment_paid'  => $downpaymentPaid,
+                'amount_paid'       => $amountPaid,
+                'change_amount'     => $changeAmount,
+                'promo'             => $promo?->title,
             ]);
 
             return response()->json([
-                'success'          => true,
-                'message'          => 'Checkout successful',
-                'total_amount'     => $finalAmount,
-                'discount'         => $discount,
-                'downpayment_paid' => $downpaymentPaid,
-                'amount_paid'      => $amountPaid,
-                'change_amount'    => max(0, $changeAmount),
-                'nights_stayed'    => $actualNights,
-                'expected_nights'  => $expectedNights,
-                'extra_nights'     => $extraNights,
-                'overdue_rate'     => $overdueRate,
-                'nightly_rate'     => $ratePerNight,
-                'change'           => max(0, $changeAmount),
-                'checked_out_at'   => $checkOutNow->format('Y-m-d H:i:s'),
+                'success'             => true,
+                'message'             => $discountApplies
+                    ? "Checkout successful — {$actualNights} nights at ₱" . self::DISCOUNTED_RATE . "/night (discounted)"
+                    : "Checkout successful — {$actualNights} nights at ₱{$baseRate}/night",
+                'total_amount'        => $finalAmount,
+                'discount'            => $discount,
+                'downpayment_paid'    => $downpaymentPaid,
+                'amount_paid'         => $amountPaid,
+                'change_amount'       => max(0, $changeAmount),
+                'nights_stayed'       => $actualNights,
+                'expected_nights'     => $expectedNights,
+                'base_rate'           => $baseRate,
+                'effective_rate'      => $effectiveRate,
+                'is_overdue'          => $isOverdue,
+                'discount_applied'    => $discountApplies,
+                'discount_threshold'  => self::DISCOUNT_THRESHOLD_NIGHTS,
+                'discounted_rate'     => self::DISCOUNTED_RATE,
+                'change'              => max(0, $changeAmount),
+                'checked_out_at'      => $checkOutNow->format('Y-m-d H:i:s'),
             ]);
         } catch (\Exception $e) {
             DB::rollBack();
