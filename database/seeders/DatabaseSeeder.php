@@ -135,34 +135,35 @@ class DatabaseSeeder extends Seeder
             ]);
         }
 
-        // ─── 3. Create Parking Slots (30 slots with realistic numbering) ─────
+        // ─── 3. Create Parking Slots (30 slots — ALL ₱200/night) ─────────────
 
         $slots = [];
-        $slotConfigs = [
+        $slotNumbers = [
             // Ground Floor - A1 to A15
-            ['A01', 250], ['A02', 250], ['A03', 250], ['A04', 250], ['A05', 250],
-            ['A06', 250], ['A07', 250], ['A08', 250], ['A09', 250], ['A10', 250],
-            ['A11', 250], ['A12', 250], ['A13', 250], ['A14', 250], ['A15', 250],
+            'A01', 'A02', 'A03', 'A04', 'A05',
+            'A06', 'A07', 'A08', 'A09', 'A10',
+            'A11', 'A12', 'A13', 'A14', 'A15',
             // Second Floor - B1 to B10
-            ['B01', 200], ['B02', 200], ['B03', 200], ['B04', 200], ['B05', 200],
-            ['B06', 200], ['B07', 200], ['B08', 200], ['B09', 200], ['B10', 200],
+            'B01', 'B02', 'B03', 'B04', 'B05',
+            'B06', 'B07', 'B08', 'B09', 'B10',
             // VIP Section - V1 to V5
-            ['V01', 500], ['V02', 500], ['V03', 500], ['V04', 500], ['V05', 500],
+            'V01', 'V02', 'V03', 'V04', 'V05',
         ];
 
-        foreach ($slotConfigs as $i => $config) {
+        $totalSlots = count($slotNumbers);
+        foreach ($slotNumbers as $i => $slotNumber) {
             // Make first 5 slots occupied, last 2 maintenance, rest available
             $status = 'available';
             if ($i < 5) {
                 $status = 'occupied';
-            } elseif ($i >= count($slotConfigs) - 2) {
+            } elseif ($i >= $totalSlots - 2) {
                 $status = 'maintenance';
             }
 
             $slots[] = ParkingSlot::create([
-                'slot_number'  => $config[0],
+                'slot_number'  => $slotNumber,
                 'status'       => $status,
-                'nightly_rate' => $config[1],
+                'nightly_rate' => 200, // ✅ ALL SLOTS ₱200
             ]);
         }
 
@@ -278,13 +279,12 @@ class DatabaseSeeder extends Seeder
                 'checked_in_by'  => $staff1->id,
             ]);
 
-            $totalAmount = $nights * $slot->nightly_rate;
+            $totalAmount = $nights * 200; // ✅ Fixed at ₱200/night
             $discount = $promo ? ($promo->discount / 100 * $totalAmount) : 0;
             $finalAmount = $totalAmount - $discount;
             $amountPaid = $finalAmount + rand(0, 50); // Sometimes overpay
             $changeAmount = max(0, $amountPaid - $finalAmount);
 
-            // ✅ FIX: Only use 'cash' or 'gcash' - removed 'card'
             $paymentMethod = ['cash', 'cash', 'gcash'][rand(0, 2)];
 
             ParkingPayment::create([
@@ -516,7 +516,7 @@ class DatabaseSeeder extends Seeder
         // ─── 11. Create Fuel Sales ─────────────────────────────────────────────
 
         $staffMembers = [$staff1, $staff2];
-        $paymentMethods = ['cash', 'cash', 'gcash']; // ✅ FIX: Only cash and gcash
+        $paymentMethods = ['cash', 'cash', 'gcash'];
 
         foreach ($fuelInventories as $i => $inventory) {
             if ($inventory->remaining_liters > 0) {
@@ -628,7 +628,7 @@ class DatabaseSeeder extends Seeder
         $this->command->info('');
         $this->command->info('👥 Customers:    ' . count($customers) . ' registered');
         $this->command->info('🚗 Vehicles:     ' . (count($vehicles) + count($extraVehicles)) . ' total');
-        $this->command->info('🅿️  Slots:        ' . count($slots) . ' parking slots');
+        $this->command->info('🅿️  Slots:        ' . count($slots) . ' parking slots (ALL ₱200/night)');
         $this->command->info('📅 Bookings:     ' . count($bookings) . ' total');
         $this->command->info('⛽ Fuel Products: ' . count($fuelProducts));
         $this->command->info('📦 Fuel Inventory: ' . count($fuelInventories) . ' records');
