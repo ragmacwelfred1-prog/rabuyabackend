@@ -67,6 +67,10 @@ dayjs.extend(relativeTime);
 const { Option } = Select;
 const { TabPane } = Tabs;
 
+// ─── Discount rules (must match backend ParkingController) ────────────────
+const DISCOUNT_THRESHOLD_NIGHTS = 6;
+const DISCOUNTED_RATE = 180;
+
 // ─── INTERFACES ───────────────────────────────────────────────────────────────
 
 interface Vehicle {
@@ -86,6 +90,7 @@ interface Customer {
     plate_number?: string;
     vehicle_model?: string;
     vehicles?: Vehicle[];
+    bookings?: Booking[];
     created_at?: string;
     // License fields
     license_number?: string;
@@ -172,16 +177,17 @@ interface ReceiptData {
     payment_method: string;
     processed_by: string;
     processed_at: string;
+    discount_applied?: boolean;
 }
 
 interface NotificationItem {
     id: string;
     type:
-        | 'pending_booking'
-        | 'approved_checkin'
-        | 'overdue_checkout'
-        | 'today_checkout'
-        | 'soon_checkout';
+    | 'pending_booking'
+    | 'approved_checkin'
+    | 'overdue_checkout'
+    | 'today_checkout'
+    | 'soon_checkout';
     title: string;
     message: string;
     customer_name: string;
@@ -211,9 +217,6 @@ const LICENSE_TYPE_LABELS: Record<string, string> = {
     non_professional: 'Non-Professional',
     student: 'Student Permit',
 };
-
-// ─── OVERDUE DISCOUNT CONFIG ────────────────────────────────────────────────
-const OVERDUE_DISCOUNT_PER_NIGHT = 20;
 
 // ─── COMPONENT ────────────────────────────────────────────────────────────────
 
@@ -275,7 +278,7 @@ const Customers: React.FC = () => {
         null,
     );
 
-    // ─── NEW: Customer Edit/License Management State ──────────────────────
+    // Customer Edit/License Management
     const [editCustomerModal, setEditCustomerModal] = useState(false);
     const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(
         null,
@@ -298,45 +301,74 @@ const Customers: React.FC = () => {
 
     // ─── COMPUTED ─────────────────────────────────────────────────────────────
 
-    const actualNights = checkoutModal
-    ? Math.max(
-          checkoutModal.expected_nights ?? 1,
-          calculateNights(
-              checkoutModal.check_in_date,
-              dayjs().format('YYYY-MM-DD'),
-          ),
-      )
-    : 0;
+    /**
+     * Compute the nights / rate / total for the selected checkout.
+     * Rules (Interpretation C):
+     *   - Base rate = slot.nightly_rate (default 200)
+     *   - Discount applies ONLY when:
+     *       1) actual nights >= DISCOUNT_THRESHOLD_NIGHTS (6)
+     *       2) actual nights > expected nights (overdue)
+     *   - When applied, ALL nights are charged at DISCOUNTED_RATE (180)
+     */
+    const checkoutComputed = useMemo(() => {
+        if (!checkoutModal) return null;
 
-    const expectedNightsForCheckout = checkoutModal
-        ? (checkoutModal.expected_nights ?? actualNights)
-        : 0;
+        const today = dayjs().startOf('day');
+        const checkInDay = dayjs(checkoutModal.check_in_date).startOf('day');
+        const actualNights = Math.max(1, today.diff(checkInDay, 'day'));
 
-    const normalNights = checkoutModal
-        ? Math.min(actualNights, expectedNightsForCheckout)
-        : 0;
-    const extraNights = checkoutModal
-        ? Math.max(0, actualNights - expectedNightsForCheckout)
-        : 0;
+        const expectedNights = Math.max(
+            1,
+            checkoutModal.expected_nights ?? actualNights,
+        );
 
-    const nightlyRate = checkoutModal?.parking_slot?.nightly_rate ?? 200;
-    const overdueRate = Math.max(0, nightlyRate - OVERDUE_DISCOUNT_PER_NIGHT);
+        const isOverdue = actualNights > expectedNights;
+        const discountApplies =
+            actualNights >= DISCOUNT_THRESHOLD_NIGHTS && isOverdue;
 
-    const subtotalBeforeDeductions = checkoutModal
-        ? normalNights * nightlyRate + extraNights * overdueRate
-        : 0;
+        const baseRate = checkoutModal.parking_slot?.nightly_rate ?? 200;
+        const effectiveRate = discountApplies ? DISCOUNTED_RATE : baseRate;
 
-    const actualTotal = checkoutModal
-        ? Math.max(
-              0,
-              subtotalBeforeDeductions - (checkoutModal.downpayment_paid ?? 0),
-          )
-        : 0;
+        const grossTotal = actualNights * effectiveRate;
+        const downpaymentPaid = checkoutModal.downpayment_paid ?? 0;
 
-    const paid = parseFloat(amountPaid) || 0;
-    const disc = parseFloat(discount) || 0;
-    const totalAfterDiscount = Math.max(0, actualTotal - disc);
-    const change = paid - totalAfterDiscount;
+        // Applied manual / promo discount (from state)
+        const manualDisc = parseFloat(discount) || 0;
+        const promoDisc =
+            checkoutModal.promos && checkoutModal.promos.length > 0
+                ? checkoutModal.promos.reduce(
+                    (sum, p) => sum + (Number(p?.discount) || 0),
+                    0,
+                )
+                : 0;
+
+        // Use whichever was set initially
+        const appliedDiscount = manualDisc || promoDisc;
+
+        const paid = parseFloat(amountPaid) || 0;
+
+        const afterDownpayment = Math.max(0, grossTotal - downpaymentPaid);
+        const totalAfterDiscount = Math.max(
+            0,
+            afterDownpayment - appliedDiscount,
+        );
+        const change = paid - totalAfterDiscount;
+
+        return {
+            actualNights,
+            expectedNights,
+            isOverdue,
+            discountApplies,
+            baseRate,
+            effectiveRate,
+            grossTotal,
+            downpaymentPaid,
+            appliedDiscount,
+            paid,
+            totalAfterDiscount,
+            change,
+        };
+    }, [checkoutModal, amountPaid, discount]);
 
     const availSlots = slots.filter((s) => s.status === 'available');
     const occupiedSlots = slots.filter((s) => s.status === 'occupied').length;
@@ -348,9 +380,8 @@ const Customers: React.FC = () => {
     const totalPending = pendingBookings.length;
     const totalActive = transactions.length;
 
-    // ─── Customer License Stats ─────────────────────────────────────────────
     const withLicense = allCustomers.filter(
-        (c) => c.license_number || c.license_photo
+        (c) => c.license_number || c.license_photo,
     ).length;
 
     const licenseExpiringSoon = allCustomers.filter((c) => {
@@ -388,27 +419,27 @@ const Customers: React.FC = () => {
             booking_type?: 'online' | 'walk_in';
             created_at: string;
         }[] = [
-            ...pendingBookings.map((b) => ({
-                customer_id: b.customer_id,
-                booking_type: b.booking_type,
-                created_at: b.created_at,
-            })),
-            ...approvedBookings.map((b) => ({
-                customer_id: b.customer_id,
-                booking_type: b.booking_type,
-                created_at: b.created_at,
-            })),
-            ...transactions.map((t) => ({
-                customer_id: t.customer_id!,
-                booking_type: t.booking_type,
-                created_at: t.check_in_date,
-            })),
-            ...history.map((t) => ({
-                customer_id: t.customer_id!,
-                booking_type: t.booking_type,
-                created_at: t.check_in_date,
-            })),
-        ];
+                ...pendingBookings.map((b) => ({
+                    customer_id: b.customer_id,
+                    booking_type: b.booking_type,
+                    created_at: b.created_at,
+                })),
+                ...approvedBookings.map((b) => ({
+                    customer_id: b.customer_id,
+                    booking_type: b.booking_type,
+                    created_at: b.created_at,
+                })),
+                ...transactions.map((t) => ({
+                    customer_id: t.customer_id!,
+                    booking_type: t.booking_type,
+                    created_at: t.check_in_date,
+                })),
+                ...history.map((t) => ({
+                    customer_id: t.customer_id!,
+                    booking_type: t.booking_type,
+                    created_at: t.check_in_date,
+                })),
+            ];
         const latestMap = new Map<
             number,
             { type: 'online' | 'walk_in' | null; date: string }
@@ -547,7 +578,6 @@ const Customers: React.FC = () => {
                 histRes.data?.data ??
                 (Array.isArray(histRes.data) ? histRes.data : []);
 
-            // Process customers with license photo URL
             const customers = Array.isArray(custRes.data) ? custRes.data : [];
             customers.forEach((c: Customer) => {
                 if (c.license_photo) {
@@ -642,7 +672,8 @@ const Customers: React.FC = () => {
             email: customer.email || '',
             phone_number: customer.phone_number,
             address: customer.address || '',
-            is_active: customer.is_active !== undefined ? customer.is_active : true,
+            is_active:
+                customer.is_active !== undefined ? customer.is_active : true,
             license_number: customer.license_number || '',
             license_type: customer.license_type || undefined,
             license_expiration: customer.license_expiration
@@ -667,16 +698,23 @@ const Customers: React.FC = () => {
                     : null,
             };
 
-            const response = await api.put(`/admin/customers/${selectedCustomer?.id}`, data);
+            const response = await api.put(
+                `/admin/customers/${selectedCustomer?.id}`,
+                data,
+            );
             if (response.data.success) {
                 message.success('Customer updated successfully');
                 setEditCustomerModal(false);
                 fetchAllData();
             } else {
-                message.error(response.data.message || 'Failed to update customer');
+                message.error(
+                    response.data.message || 'Failed to update customer',
+                );
             }
         } catch (error: any) {
-            message.error(error.response?.data?.message || 'Failed to update customer');
+            message.error(
+                error.response?.data?.message || 'Failed to update customer',
+            );
         } finally {
             setSubmitting(false);
         }
@@ -693,19 +731,23 @@ const Customers: React.FC = () => {
                 formData,
                 {
                     headers: { 'Content-Type': 'multipart/form-data' },
-                }
+                },
             );
             if (response.data.success) {
                 message.success('License photo uploaded successfully');
                 fetchAllData();
-                // Update view customer if open
                 if (viewCustomer && viewCustomer.id === customerId) {
-                    const updated = await api.get(`/admin/customers/${customerId}`);
+                    const updated = await api.get(
+                        `/admin/customers/${customerId}`,
+                    );
                     setViewCustomer(updated.data);
                 }
             }
         } catch (error: any) {
-            message.error(error.response?.data?.message || 'Failed to upload license photo');
+            message.error(
+                error.response?.data?.message ||
+                'Failed to upload license photo',
+            );
         } finally {
             setUploadingLicense(false);
         }
@@ -721,7 +763,10 @@ const Customers: React.FC = () => {
                 setViewCustomer(updated.data);
             }
         } catch (error: any) {
-            message.error(error.response?.data?.message || 'Failed to delete license photo');
+            message.error(
+                error.response?.data?.message ||
+                'Failed to delete license photo',
+            );
         }
     };
 
@@ -730,7 +775,9 @@ const Customers: React.FC = () => {
         try {
             const r = await api.post(`/admin/bookings/${id}/approve`);
             if (r.data.success) {
-                message.success('Booking approved! Customer can now check in.');
+                message.success(
+                    'Booking approved! Customer can now check in.',
+                );
                 const booking = pendingBookings.find((b) => b.id === id);
                 setPendingBookings((prev) => prev.filter((b) => b.id !== id));
                 if (booking) {
@@ -788,7 +835,8 @@ const Customers: React.FC = () => {
         Modal.confirm({
             title: 'Delete Booking',
             icon: <ExclamationCircleOutlined />,
-            content: 'Permanently delete this booking? This cannot be undone.',
+            content:
+                'Permanently delete this booking? This cannot be undone.',
             okText: 'Yes, Delete',
             okButtonProps: { danger: true },
             cancelText: 'Cancel',
@@ -905,55 +953,67 @@ const Customers: React.FC = () => {
         }
     };
 
+    // ─── CHECKOUT: open modal with INTERPRETATION C discount ──────────────
     const openCheckout = (tx: ParkingTransaction) => {
         if (!isAdmin) {
             message.warning('Only admin can process checkout.');
             return;
         }
+
         setCheckoutModal(tx);
 
-        const nightsNow = calculateNights(
-            tx.check_in_date,
-            dayjs().format('YYYY-MM-DD'),
+        // ─── Compute using the discount rules ───────────────────────
+        const today = dayjs().startOf('day');
+        const checkInDay = dayjs(tx.check_in_date).startOf('day');
+        const actualNights = Math.max(1, today.diff(checkInDay, 'day'));
+        const expectedNights = Math.max(
+            1,
+            tx.expected_nights ?? actualNights,
         );
-        const expectedNightsVal = tx.expected_nights ?? nightsNow;
-        const normal = Math.min(nightsNow, expectedNightsVal);
-        const extra = Math.max(0, nightsNow - expectedNightsVal);
-        const rate = tx.parking_slot?.nightly_rate ?? 200;
-        const oRate = Math.max(0, rate - OVERDUE_DISCOUNT_PER_NIGHT);
-
-        const subtotal = normal * rate + extra * oRate;
-        const downpayment = tx.downpayment_paid ?? 0;
+        const isOverdue = actualNights > expectedNights;
+        const discountApplies =
+            actualNights >= DISCOUNT_THRESHOLD_NIGHTS && isOverdue;
+        const baseRate = tx.parking_slot?.nightly_rate ?? 200;
+        const effectiveRate = discountApplies ? DISCOUNTED_RATE : baseRate;
+        const downpaymentPaid = tx.downpayment_paid ?? 0;
 
         const promoDiscount =
             tx.promos && tx.promos.length > 0
                 ? tx.promos.reduce(
-                      (sum: number, p: any) => sum + (Number(p?.discount) || 0),
-                      0,
-                  )
+                    (sum, p: any) => sum + (Number(p?.discount) || 0),
+                    0,
+                )
                 : 0;
-        setDiscount(promoDiscount.toString());
 
-        setAmountPaid(
-            Math.max(0, subtotal - downpayment - promoDiscount).toString(),
+        const grossTotal = actualNights * effectiveRate;
+        const computedTotal = Math.max(
+            0,
+            grossTotal - downpaymentPaid - promoDiscount,
         );
+
+        setDiscount(promoDiscount.toString());
+        setAmountPaid(computedTotal.toFixed(2));
     };
 
     const handleCheckout = async () => {
-        if (!checkoutModal || !isAdmin) return;
-        if (isNaN(paid) || paid < totalAfterDiscount) {
-            message.error(
-                `Insufficient payment. Required: ${fmtPHP(totalAfterDiscount)}`,
-            );
+        if (!checkoutModal || !checkoutComputed) return;
+
+        const paid = checkoutComputed.paid;
+        const total = checkoutComputed.totalAfterDiscount;
+
+        if (isNaN(paid) || paid < total) {
+            message.error(`Insufficient payment. Required: ${fmtPHP(total)}`);
             return;
         }
 
         const snap = { ...checkoutModal };
+        const computed = { ...checkoutComputed };
         setCheckingOut(true);
+
         try {
             const r = await api.post(`/admin/parking/checkout/${snap.id}`, {
                 amount_paid: paid,
-                discount: disc,
+                discount: computed.appliedDiscount,
                 payment_method: 'cash',
             });
 
@@ -961,12 +1021,15 @@ const Customers: React.FC = () => {
                 const ch =
                     r.data.change_amount ??
                     r.data.change ??
-                    Math.max(0, paid - totalAfterDiscount);
+                    Math.max(0, paid - total);
 
                 setCheckoutModal(null);
                 setAmountPaid('');
                 setDiscount('0');
-                message.success(`Checkout done! ${actualNights} night(s)`);
+
+                message.success(
+                    `Checkout done! ${computed.actualNights} night(s) at ₱${computed.effectiveRate}/night${computed.discountApplies ? ' (discounted)' : ''}`,
+                );
 
                 setReceiptModal({
                     transaction_number: snap.transaction_number,
@@ -979,15 +1042,18 @@ const Customers: React.FC = () => {
                     check_out:
                         r.data.checked_out_at ??
                         dayjs().format('YYYY-MM-DD HH:mm:ss'),
-                    nights_stayed: r.data.nights_stayed ?? actualNights,
-                    rate_per_night: snap.parking_slot?.nightly_rate ?? 200,
-                    total_amount: r.data.total_amount ?? totalAfterDiscount,
+                    nights_stayed: r.data.nights_stayed ?? computed.actualNights,
+                    rate_per_night:
+                        r.data.effective_rate ?? computed.effectiveRate,
+                    total_amount: r.data.total_amount ?? total,
                     amount_paid: r.data.amount_paid ?? paid,
-                    discount: r.data.discount ?? disc,
+                    discount: r.data.discount ?? computed.appliedDiscount,
                     change: ch,
                     payment_method: 'cash',
                     processed_by: 'Admin',
                     processed_at: dayjs().format('YYYY-MM-DD HH:mm:ss'),
+                    discount_applied:
+                        r.data.discount_applied ?? computed.discountApplies,
                 });
 
                 await fetchAllData();
@@ -1022,7 +1088,9 @@ const Customers: React.FC = () => {
 
     const selectCustomer = (c: Customer) => {
         if (transactions.some((t) => t.customer_id === c.id)) {
-            message.warning('Customer already has an active parking session.');
+            message.warning(
+                'Customer already has an active parking session.',
+            );
             setSearchCustModal(false);
             return;
         }
@@ -1602,8 +1670,8 @@ const Customers: React.FC = () => {
                                 color: ov
                                     ? '#EF4444'
                                     : tod
-                                      ? '#F59E0B'
-                                      : 'var(--text-secondary)',
+                                        ? '#F59E0B'
+                                        : 'var(--text-secondary)',
                             }}
                         >
                             {fmtTime(r.expected_checkout_time)}
@@ -1903,8 +1971,8 @@ const Customers: React.FC = () => {
                         r.payment_method === 'gcash'
                             ? 'blue'
                             : r.payment_method === 'card'
-                              ? 'purple'
-                              : 'green'
+                                ? 'purple'
+                                : 'green'
                     }
                     style={{
                         fontSize: 11,
@@ -2029,12 +2097,19 @@ const Customers: React.FC = () => {
                     : false;
                 const expiringSoon = r.license_expiration
                     ? dayjs(r.license_expiration).isAfter(dayjs()) &&
-                      dayjs(r.license_expiration).isBefore(dayjs().add(30, 'day'))
+                    dayjs(r.license_expiration).isBefore(
+                        dayjs().add(30, 'day'),
+                    )
                     : false;
 
                 if (!hasLicense) {
                     return (
-                        <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                        <span
+                            style={{
+                                fontSize: 12,
+                                color: 'var(--text-tertiary)',
+                            }}
+                        >
                             Not set
                         </span>
                     );
@@ -2066,29 +2141,38 @@ const Customers: React.FC = () => {
                         <div style={{ fontSize: 11, marginTop: 2 }}>
                             {r.license_expiration ? (
                                 <>
-                                    <CalendarOutlined style={{ marginRight: 4 }} />
+                                    <CalendarOutlined
+                                        style={{ marginRight: 4 }}
+                                    />
                                     <span
                                         style={{
                                             color: isExpired
                                                 ? '#EF4444'
                                                 : expiringSoon
-                                                ? '#F59E0B'
-                                                : 'var(--text-secondary)',
+                                                    ? '#F59E0B'
+                                                    : 'var(--text-secondary)',
                                         }}
                                     >
-                                        {dayjs(r.license_expiration).format('MMM DD, YYYY')}
+                                        {dayjs(r.license_expiration).format(
+                                            'MMM DD, YYYY',
+                                        )}
                                         {isExpired && ' (Expired)'}
                                         {expiringSoon && ' (Expiring soon)'}
                                     </span>
                                 </>
                             ) : (
-                                <span style={{ color: 'var(--text-tertiary)' }}>
+                                <span
+                                    style={{ color: 'var(--text-tertiary)' }}
+                                >
                                     No expiration
                                 </span>
                             )}
                         </div>
                         {r.license_photo && (
-                            <Tag color="blue" style={{ fontSize: 10, marginTop: 2 }}>
+                            <Tag
+                                color="blue"
+                                style={{ fontSize: 10, marginTop: 2 }}
+                            >
                                 📷 Has photo
                             </Tag>
                         )}
@@ -2364,6 +2448,9 @@ const Customers: React.FC = () => {
         flexDirection: 'column',
         justifyContent: 'center',
     };
+
+    const viewCustomerVehicles = viewCustomer?.vehicles ?? [];
+    const viewCustomerBookings = viewCustomer?.bookings ?? [];
 
     // ─── RENDER ───────────────────────────────────────────────────────────────
 
@@ -2864,7 +2951,7 @@ const Customers: React.FC = () => {
                     background: 'var(--bg-card)',
                     borderColor: 'var(--border-color)',
                 }}
-                styles={{ body: {padding: '16px', overflow: 'visible'} }}
+                styles={{ body: { padding: '16px', overflow: 'visible' } }}
             >
                 <Tabs
                     activeKey={activeTab}
@@ -2884,8 +2971,14 @@ const Customers: React.FC = () => {
                 title={
                     <Space>
                         <EditOutlined style={{ color: 'var(--success)' }} />
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                            Edit Customer - {selectedCustomer?.first_name} {selectedCustomer?.last_name}
+                        <span
+                            style={{
+                                fontWeight: 600,
+                                color: 'var(--text-primary)',
+                            }}
+                        >
+                            Edit Customer - {selectedCustomer?.first_name}{' '}
+                            {selectedCustomer?.last_name}
                         </span>
                     </Space>
                 }
@@ -2895,10 +2988,19 @@ const Customers: React.FC = () => {
                 width={640}
                 destroyOnClose
             >
-                <Form form={editForm} layout="vertical" onFinish={handleSaveCustomer} size="small">
+                <Form
+                    form={editForm}
+                    layout="vertical"
+                    onFinish={handleSaveCustomer}
+                    size="small"
+                >
                     <Row gutter={12}>
                         <Col span={8}>
-                            <Form.Item name="first_name" label="First Name" rules={[{ required: true }]}>
+                            <Form.Item
+                                name="first_name"
+                                label="First Name"
+                                rules={[{ required: true }]}
+                            >
                                 <Input placeholder="First name" />
                             </Form.Item>
                         </Col>
@@ -2908,7 +3010,11 @@ const Customers: React.FC = () => {
                             </Form.Item>
                         </Col>
                         <Col span={8}>
-                            <Form.Item name="last_name" label="Last Name" rules={[{ required: true }]}>
+                            <Form.Item
+                                name="last_name"
+                                label="Last Name"
+                                rules={[{ required: true }]}
+                            >
                                 <Input placeholder="Last name" />
                             </Form.Item>
                         </Col>
@@ -2916,12 +3022,20 @@ const Customers: React.FC = () => {
 
                     <Row gutter={12}>
                         <Col span={12}>
-                            <Form.Item name="email" label="Email" rules={[{ required: true, type: 'email' }]}>
+                            <Form.Item
+                                name="email"
+                                label="Email"
+                                rules={[{ required: true, type: 'email' }]}
+                            >
                                 <Input placeholder="Email" />
                             </Form.Item>
                         </Col>
                         <Col span={12}>
-                            <Form.Item name="phone_number" label="Phone Number" rules={[{ required: true }]}>
+                            <Form.Item
+                                name="phone_number"
+                                label="Phone Number"
+                                rules={[{ required: true }]}
+                            >
                                 <Input placeholder="Phone number" />
                             </Form.Item>
                         </Col>
@@ -2942,7 +3056,10 @@ const Customers: React.FC = () => {
 
                     <Row gutter={12}>
                         <Col span={8}>
-                            <Form.Item name="license_number" label="License Number">
+                            <Form.Item
+                                name="license_number"
+                                label="License Number"
+                            >
                                 <Input placeholder="e.g., N01-23-004567" />
                             </Form.Item>
                         </Col>
@@ -2950,7 +3067,10 @@ const Customers: React.FC = () => {
                             <Form.Item name="license_type" label="License Type">
                                 <Select placeholder="Select type" allowClear>
                                     {LICENSE_TYPES.map((type) => (
-                                        <Option key={type.value} value={type.value}>
+                                        <Option
+                                            key={type.value}
+                                            value={type.value}
+                                        >
                                             {type.label}
                                         </Option>
                                     ))}
@@ -2958,16 +3078,25 @@ const Customers: React.FC = () => {
                             </Form.Item>
                         </Col>
                         <Col span={8}>
-                            <Form.Item name="license_expiration" label="Expiration Date">
+                            <Form.Item
+                                name="license_expiration"
+                                label="Expiration Date"
+                            >
                                 <DatePicker style={{ width: '100%' }} />
                             </Form.Item>
                         </Col>
                     </Row>
 
-                    {/* License Photo Upload */}
                     {selectedCustomer && (
                         <div style={{ marginBottom: 16 }}>
-                            <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 8 }}>
+                            <div
+                                style={{
+                                    fontSize: 13,
+                                    fontWeight: 500,
+                                    color: 'var(--text-primary)',
+                                    marginBottom: 8,
+                                }}
+                            >
                                 License Photo
                             </div>
                             {selectedCustomer.license_photo_url ? (
@@ -2975,12 +3104,23 @@ const Customers: React.FC = () => {
                                     <Image
                                         src={selectedCustomer.license_photo_url}
                                         alt="License"
-                                        style={{ maxWidth: 120, maxHeight: 120, objectFit: 'cover', borderRadius: 8 }}
+                                        style={{
+                                            maxWidth: 120,
+                                            maxHeight: 120,
+                                            objectFit: 'cover',
+                                            borderRadius: 8,
+                                        }}
                                         preview
                                     />
                                     <div>
-                                        <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                            {selectedCustomer.license_photo_original_name || 'License photo'}
+                                        <div
+                                            style={{
+                                                fontSize: 11,
+                                                color: 'var(--text-secondary)',
+                                            }}
+                                        >
+                                            {selectedCustomer.license_photo_original_name ||
+                                                'License photo'}
                                         </div>
                                         <Button
                                             size="small"
@@ -2988,7 +3128,9 @@ const Customers: React.FC = () => {
                                             icon={<DeleteOutlined />}
                                             onClick={() => {
                                                 if (selectedCustomer) {
-                                                    handleDeleteLicense(selectedCustomer.id);
+                                                    handleDeleteLicense(
+                                                        selectedCustomer.id,
+                                                    );
                                                 }
                                             }}
                                             style={{ marginTop: 4 }}
@@ -3003,27 +3145,48 @@ const Customers: React.FC = () => {
                                     showUploadList={false}
                                     beforeUpload={(file) => {
                                         if (selectedCustomer) {
-                                            handleUploadLicense(file, selectedCustomer.id);
+                                            handleUploadLicense(
+                                                file,
+                                                selectedCustomer.id,
+                                            );
                                         }
                                         return false;
                                     }}
                                 >
-                                    <Button icon={<CameraOutlined />} loading={uploadingLicense}>
+                                    <Button
+                                        icon={<CameraOutlined />}
+                                        loading={uploadingLicense}
+                                    >
                                         Upload License Photo
                                     </Button>
                                 </Upload>
                             )}
-                            <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+                            <div
+                                style={{
+                                    fontSize: 11,
+                                    color: 'var(--text-secondary)',
+                                    marginTop: 4,
+                                }}
+                            >
                                 JPG, PNG, GIF up to 5MB
                             </div>
                         </div>
                     )}
 
-                    <Form.Item style={{ textAlign: 'right', marginBottom: 0 }}>
-                        <Button onClick={() => setEditCustomerModal(false)} style={{ marginRight: 8 }}>
+                    <Form.Item
+                        style={{ textAlign: 'right', marginBottom: 0 }}
+                    >
+                        <Button
+                            onClick={() => setEditCustomerModal(false)}
+                            style={{ marginRight: 8 }}
+                        >
                             Cancel
                         </Button>
-                        <Button type="primary" htmlType="submit" loading={submitting}>
+                        <Button
+                            type="primary"
+                            htmlType="submit"
+                            loading={submitting}
+                        >
                             Update Customer
                         </Button>
                     </Form.Item>
@@ -3035,7 +3198,12 @@ const Customers: React.FC = () => {
                 title={
                     <Space>
                         <UserOutlined style={{ color: 'var(--primary)' }} />
-                        <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                        <span
+                            style={{
+                                fontWeight: 600,
+                                color: 'var(--text-primary)',
+                            }}
+                        >
                             Customer Details
                         </span>
                     </Space>
@@ -3044,16 +3212,23 @@ const Customers: React.FC = () => {
                 onCancel={() => setViewCustomerModal(false)}
                 footer={[
                     isAdmin && (
-                        <Button key="edit" type="primary" onClick={() => {
-                            if (viewCustomer) {
-                                setViewCustomerModal(false);
-                                handleEditCustomer(viewCustomer);
-                            }
-                        }}>
+                        <Button
+                            key="edit"
+                            type="primary"
+                            onClick={() => {
+                                if (viewCustomer) {
+                                    setViewCustomerModal(false);
+                                    handleEditCustomer(viewCustomer);
+                                }
+                            }}
+                        >
                             <EditOutlined /> Edit
                         </Button>
                     ),
-                    <Button key="close" onClick={() => setViewCustomerModal(false)}>
+                    <Button
+                        key="close"
+                        onClick={() => setViewCustomerModal(false)}
+                    >
                         Close
                     </Button>,
                 ]}
@@ -3065,25 +3240,44 @@ const Customers: React.FC = () => {
                         <TabPane tab="Profile" key="profile">
                             <Descriptions bordered size="small" column={2}>
                                 <Descriptions.Item label="Name" span={2}>
-                                    {viewCustomer.first_name} {viewCustomer.middle_name || ''} {viewCustomer.last_name}
+                                    {viewCustomer.first_name}{' '}
+                                    {viewCustomer.middle_name || ''}{' '}
+                                    {viewCustomer.last_name}
                                 </Descriptions.Item>
-                                <Descriptions.Item label="Email">{viewCustomer.email || 'N/A'}</Descriptions.Item>
-                                <Descriptions.Item label="Phone">{viewCustomer.phone_number}</Descriptions.Item>
-                                <Descriptions.Item label="Address" span={2}>
+                                <Descriptions.Item label="Email">
+                                    {viewCustomer.email || 'N/A'}
+                                </Descriptions.Item>
+                                <Descriptions.Item label="Phone">
+                                    {viewCustomer.phone_number}
+                                </Descriptions.Item>
+                                <Descriptions.Item
+                                    label="Address"
+                                    span={2}
+                                >
                                     {viewCustomer.address || 'Not set'}
                                 </Descriptions.Item>
                                 <Descriptions.Item label="Status">
                                     <Badge
-                                        status={viewCustomer.is_active !== false ? 'success' : 'error'}
-                                        text={viewCustomer.is_active !== false ? 'Active' : 'Inactive'}
+                                        status={
+                                            viewCustomer.is_active !== false
+                                                ? 'success'
+                                                : 'error'
+                                        }
+                                        text={
+                                            viewCustomer.is_active !== false
+                                                ? 'Active'
+                                                : 'Inactive'
+                                        }
                                     />
                                 </Descriptions.Item>
                                 <Descriptions.Item label="Vehicles">
-                                    {viewCustomer.vehicles?.length || 0} vehicle(s)
+                                    {viewCustomerVehicles.length} vehicle(s)
                                 </Descriptions.Item>
                             </Descriptions>
 
-                            <Divider orientation="left">License Information</Divider>
+                            <Divider orientation="left">
+                                License Information
+                            </Divider>
 
                             <Descriptions bordered size="small" column={2}>
                                 <Descriptions.Item label="License Number">
@@ -3091,45 +3285,102 @@ const Customers: React.FC = () => {
                                 </Descriptions.Item>
                                 <Descriptions.Item label="License Type">
                                     {viewCustomer.license_type ? (
-                                        <Tag color={LICENSE_TYPE_COLORS[viewCustomer.license_type]}>
-                                            {LICENSE_TYPE_LABELS[viewCustomer.license_type]}
+                                        <Tag
+                                            color={
+                                                LICENSE_TYPE_COLORS[
+                                                viewCustomer.license_type
+                                                ]
+                                            }
+                                        >
+                                            {
+                                                LICENSE_TYPE_LABELS[
+                                                viewCustomer.license_type
+                                                ]
+                                            }
                                         </Tag>
-                                    ) : 'Not set'}
+                                    ) : (
+                                        'Not set'
+                                    )}
                                 </Descriptions.Item>
                                 <Descriptions.Item label="Expiration Date">
                                     {viewCustomer.license_expiration ? (
                                         <>
-                                            {dayjs(viewCustomer.license_expiration).format('MMM DD, YYYY')}
-                                            {dayjs(viewCustomer.license_expiration).isBefore(dayjs()) && (
-                                                <Tag color="error" style={{ marginLeft: 8 }}>Expired</Tag>
-                                            )}
-                                            {dayjs(viewCustomer.license_expiration).isAfter(dayjs()) &&
-                                             dayjs(viewCustomer.license_expiration).isBefore(dayjs().add(30, 'day')) && (
-                                                <Tag color="warning" style={{ marginLeft: 8 }}>Expiring Soon</Tag>
-                                            )}
+                                            {dayjs(
+                                                viewCustomer.license_expiration,
+                                            ).format('MMM DD, YYYY')}
+                                            {dayjs(
+                                                viewCustomer.license_expiration,
+                                            ).isBefore(dayjs()) && (
+                                                    <Tag
+                                                        color="error"
+                                                        style={{ marginLeft: 8 }}
+                                                    >
+                                                        Expired
+                                                    </Tag>
+                                                )}
+                                            {dayjs(
+                                                viewCustomer.license_expiration,
+                                            ).isAfter(dayjs()) &&
+                                                dayjs(
+                                                    viewCustomer.license_expiration,
+                                                ).isBefore(
+                                                    dayjs().add(30, 'day'),
+                                                ) && (
+                                                    <Tag
+                                                        color="warning"
+                                                        style={{
+                                                            marginLeft: 8,
+                                                        }}
+                                                    >
+                                                        Expiring Soon
+                                                    </Tag>
+                                                )}
                                         </>
-                                    ) : 'Not set'}
+                                    ) : (
+                                        'Not set'
+                                    )}
                                 </Descriptions.Item>
                                 <Descriptions.Item label="License Photo">
                                     {viewCustomer.license_photo_url ? (
                                         <Space>
                                             <Image
-                                                src={viewCustomer.license_photo_url}
+                                                src={
+                                                    viewCustomer.license_photo_url
+                                                }
                                                 alt="License"
-                                                style={{ maxWidth: 100, maxHeight: 100, objectFit: 'cover', borderRadius: 8 }}
+                                                style={{
+                                                    maxWidth: 100,
+                                                    maxHeight: 100,
+                                                    objectFit: 'cover',
+                                                    borderRadius: 8,
+                                                }}
                                                 preview
                                             />
                                             <div>
-                                                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                                                    {viewCustomer.license_photo_original_name || 'License photo'}
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--text-secondary)',
+                                                    }}
+                                                >
+                                                    {viewCustomer.license_photo_original_name ||
+                                                        'License photo'}
                                                 </div>
                                                 {isAdmin && (
                                                     <Button
                                                         size="small"
                                                         danger
-                                                        icon={<DeleteOutlined />}
-                                                        onClick={() => handleDeleteLicense(viewCustomer.id)}
-                                                        style={{ marginTop: 4 }}
+                                                        icon={
+                                                            <DeleteOutlined />
+                                                        }
+                                                        onClick={() =>
+                                                            handleDeleteLicense(
+                                                                viewCustomer.id,
+                                                            )
+                                                        }
+                                                        style={{
+                                                            marginTop: 4,
+                                                        }}
                                                     >
                                                         Delete
                                                     </Button>
@@ -3137,23 +3388,48 @@ const Customers: React.FC = () => {
                                             </div>
                                         </Space>
                                     ) : (
-                                        <span style={{ color: 'var(--text-tertiary)' }}>No photo uploaded</span>
+                                        <span
+                                            style={{
+                                                color: 'var(--text-tertiary)',
+                                            }}
+                                        >
+                                            No photo uploaded
+                                        </span>
                                     )}
                                 </Descriptions.Item>
                             </Descriptions>
                         </TabPane>
 
                         <TabPane tab="Vehicles" key="vehicles">
-                            {viewCustomer.vehicles?.length > 0 ? (
-                                viewCustomer.vehicles.map((v) => (
-                                    <Card key={v.id} size="small" style={{ marginBottom: 8 }}>
+                            {viewCustomerVehicles.length > 0 ? (
+                                viewCustomerVehicles.map((v) => (
+                                    <Card
+                                        key={v.id}
+                                        size="small"
+                                        style={{ marginBottom: 8 }}
+                                    >
                                         <Space>
-                                            <CarOutlined style={{ fontSize: 18, color: 'var(--primary)' }} />
+                                            <CarOutlined
+                                                style={{
+                                                    fontSize: 18,
+                                                    color: 'var(--primary)',
+                                                }}
+                                            />
                                             <div>
-                                                <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontWeight: 600,
+                                                        color: 'var(--text-primary)',
+                                                    }}
+                                                >
                                                     {v.plate_number}
                                                 </div>
-                                                <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 12,
+                                                        color: 'var(--text-secondary)',
+                                                    }}
+                                                >
                                                     {v.vehicle_model}
                                                 </div>
                                             </div>
@@ -3161,43 +3437,102 @@ const Customers: React.FC = () => {
                                     </Card>
                                 ))
                             ) : (
-                                <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-tertiary)' }}>
+                                <div
+                                    style={{
+                                        textAlign: 'center',
+                                        padding: 20,
+                                        color: 'var(--text-tertiary)',
+                                    }}
+                                >
                                     No vehicles registered
                                 </div>
                             )}
                         </TabPane>
 
                         <TabPane tab="Bookings" key="bookings">
-                            {viewCustomer.bookings?.length > 0 ? (
-                                viewCustomer.bookings.slice(0, 10).map((b) => (
-                                    <Card key={b.id} size="small" style={{ marginBottom: 8 }}>
+                            {(() => {
+                                const bookings = viewCustomer.bookings ?? [];
+                                if (bookings.length === 0) {
+                                    return (
+                                        <div
+                                            style={{
+                                                textAlign: 'center',
+                                                padding: 20,
+                                                color: 'var(--text-tertiary)',
+                                            }}
+                                        >
+                                            No bookings yet
+                                        </div>
+                                    );
+                                }
+                                return bookings.slice(0, 10).map((b) => (
+                                    <Card
+                                        key={b.id}
+                                        size="small"
+                                        style={{ marginBottom: 8 }}
+                                    >
                                         <Row gutter={8}>
                                             <Col span={6}>
-                                                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--text-tertiary)',
+                                                    }}
+                                                >
                                                     Slot
                                                 </div>
-                                                <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontWeight: 600,
+                                                        color: 'var(--text-primary)',
+                                                    }}
+                                                >
                                                     {b.parking_slot?.slot_number || 'N/A'}
                                                 </div>
                                             </Col>
                                             <Col span={6}>
-                                                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--text-tertiary)',
+                                                    }}
+                                                >
                                                     Check In
                                                 </div>
-                                                <div style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 12,
+                                                        color: 'var(--text-primary)',
+                                                    }}
+                                                >
                                                     {dayjs(b.check_in_date).format('MMM DD, YYYY')}
                                                 </div>
                                             </Col>
                                             <Col span={6}>
-                                                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--text-tertiary)',
+                                                    }}
+                                                >
                                                     Check Out
                                                 </div>
-                                                <div style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 12,
+                                                        color: 'var(--text-primary)',
+                                                    }}
+                                                >
                                                     {dayjs(b.check_out_date).format('MMM DD, YYYY')}
                                                 </div>
                                             </Col>
                                             <Col span={6}>
-                                                <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                                                <div
+                                                    style={{
+                                                        fontSize: 11,
+                                                        color: 'var(--text-tertiary)',
+                                                    }}
+                                                >
                                                     Status
                                                 </div>
                                                 <Tag
@@ -3205,12 +3540,12 @@ const Customers: React.FC = () => {
                                                         b.status === 'completed'
                                                             ? 'green'
                                                             : b.status === 'approved'
-                                                            ? 'blue'
-                                                            : b.status === 'pending'
-                                                            ? 'orange'
-                                                            : b.status === 'rejected'
-                                                            ? 'red'
-                                                            : 'default'
+                                                                ? 'blue'
+                                                                : b.status === 'pending'
+                                                                    ? 'orange'
+                                                                    : b.status === 'rejected'
+                                                                        ? 'red'
+                                                                        : 'default'
                                                     }
                                                     style={{ margin: 0 }}
                                                 >
@@ -3219,12 +3554,8 @@ const Customers: React.FC = () => {
                                             </Col>
                                         </Row>
                                     </Card>
-                                ))
-                            ) : (
-                                <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-tertiary)' }}>
-                                    No bookings yet
-                                </div>
-                            )}
+                                ));
+                            })()}
                         </TabPane>
                     </Tabs>
                 )}
@@ -3402,7 +3733,9 @@ const Customers: React.FC = () => {
                                         label="Check-in Date"
                                         rules={[{ required: true }]}
                                     >
-                                        <DatePicker style={{ width: '100%' }} />
+                                        <DatePicker
+                                            style={{ width: '100%' }}
+                                        />
                                     </Form.Item>
                                 </Col>
                                 <Col span={12}>
@@ -3425,7 +3758,9 @@ const Customers: React.FC = () => {
                                         label="Expected Check-out Date"
                                         rules={[{ required: true }]}
                                     >
-                                        <DatePicker style={{ width: '100%' }} />
+                                        <DatePicker
+                                            style={{ width: '100%' }}
+                                        />
                                     </Form.Item>
                                 </Col>
                                 <Col span={12}>
@@ -3471,7 +3806,7 @@ const Customers: React.FC = () => {
                 </Form>
             </Modal>
 
-            {/* ─── CHECK-OUT MODAL ───────────────────────────────────────────── */}
+            {/* ─── CHECK-OUT MODAL (UPDATED WITH DISCOUNT LOGIC) ──────────────── */}
             <Modal
                 title={
                     <span
@@ -3490,11 +3825,11 @@ const Customers: React.FC = () => {
                     setDiscount('0');
                 }}
                 footer={null}
-                width={520}
+                width={560}
                 destroyOnClose
                 style={{ background: 'var(--bg-card)' }}
             >
-                {checkoutModal && (
+                {checkoutModal && checkoutComputed && (
                     <>
                         <Descriptions
                             size="small"
@@ -3508,39 +3843,89 @@ const Customers: React.FC = () => {
                             <Descriptions.Item label="Slot">
                                 {checkoutModal.parking_slot?.slot_number}
                             </Descriptions.Item>
-                            <Descriptions.Item label="Nights Stayed">
-                                {actualNights}
+                            <Descriptions.Item label="Booked Nights">
+                                {checkoutComputed.expectedNights}
                             </Descriptions.Item>
-                            <Descriptions.Item
-                                label="Nights (Normal / Overdue)"
-                                span={2}
-                            >
-                                {normalNights}n @ ₱{nightlyRate}
-                                {extraNights > 0 &&
-                                    ` + ${extraNights}n @ ₱${overdueRate} (overdue, discounted)`}
+                            <Descriptions.Item label="Actual Nights">
+                                {checkoutComputed.actualNights}
                             </Descriptions.Item>
-                            <Descriptions.Item label="Subtotal">
-                                {fmtPHP(subtotalBeforeDeductions)}
+                            <Descriptions.Item label="Rate/Night">
+                                <span
+                                    style={{
+                                        fontWeight: 600,
+                                        color: checkoutComputed.discountApplies
+                                            ? '#10B981'
+                                            : 'var(--text-primary)',
+                                    }}
+                                >
+                                    ₱{checkoutComputed.effectiveRate}
+                                </span>
+                                {checkoutComputed.discountApplies && (
+                                    <Tag
+                                        color="green"
+                                        style={{ marginLeft: 8 }}
+                                    >
+                                        Discounted
+                                    </Tag>
+                                )}
+                            </Descriptions.Item>
+                            <Descriptions.Item label="Subtotal" span={2}>
+                                {checkoutComputed.actualNights} × ₱
+                                {checkoutComputed.effectiveRate} ={' '}
+                                {fmtPHP(checkoutComputed.grossTotal)}
                             </Descriptions.Item>
                         </Descriptions>
 
-                        {extraNights > 0 && (
+                        {/* Discount / overdue status banner */}
+                        {checkoutComputed.isOverdue && (
                             <div
                                 style={{
                                     marginBottom: 12,
                                     padding: '8px 12px',
-                                    background: 'var(--warning-bg)',
+                                    background: checkoutComputed.discountApplies
+                                        ? 'var(--success-bg)'
+                                        : 'var(--warning-bg)',
                                     borderRadius: 8,
-                                    border: '1px solid var(--warning-border)',
+                                    border: checkoutComputed.discountApplies
+                                        ? '1px solid var(--success-border)'
+                                        : '1px solid var(--warning-border)',
                                     fontSize: 12,
-                                    color: 'var(--warning-text)',
+                                    color: checkoutComputed.discountApplies
+                                        ? 'var(--success-text)'
+                                        : 'var(--warning-text)',
                                 }}
                             >
-                                ⚠️ Guest exceeded the planned stay by{' '}
-                                {extraNights} night(s). Those extra night(s) are
-                                billed at the discounted overdue rate: ₱
-                                {overdueRate}/night instead of ₱{nightlyRate}
-                                /night.
+                                {checkoutComputed.discountApplies ? (
+                                    <>
+                                        ✅ Guest stayed{' '}
+                                        <strong>
+                                            {checkoutComputed.actualNights}{' '}
+                                            nights
+                                        </strong>{' '}
+                                        (booked{' '}
+                                        {checkoutComputed.expectedNights}) —
+                                        qualifies for the{' '}
+                                        <strong>
+                                            ₱{DISCOUNTED_RATE}/night discount
+                                        </strong>{' '}
+                                        on all nights.
+                                    </>
+                                ) : (
+                                    <>
+                                        ⚠️ Guest is overdue by{' '}
+                                        {checkoutComputed.actualNights -
+                                            checkoutComputed.expectedNights}{' '}
+                                        night(s), but the discount hasn't
+                                        kicked in yet. Discount requires{' '}
+                                        <strong>
+                                            {DISCOUNT_THRESHOLD_NIGHTS}+ nights
+                                            total AND an overdue
+                                        </strong>
+                                        . Currently at{' '}
+                                        {checkoutComputed.actualNights}{' '}
+                                        night(s).
+                                    </>
+                                )}
                             </div>
                         )}
 
@@ -3576,46 +3961,44 @@ const Customers: React.FC = () => {
                                             color: 'var(--text-secondary)',
                                         }}
                                     >
-                                        — discount below is applied
-                                        automatically from this promo
+                                        — discount applied automatically
                                     </span>
                                 </div>
                             )}
 
-                        {checkoutModal.downpayment_paid &&
-                            checkoutModal.downpayment_paid > 0 && (
-                                <div
+                        {checkoutComputed.downpaymentPaid > 0 && (
+                            <div
+                                style={{
+                                    marginBottom: 12,
+                                    padding: '8px 12px',
+                                    background: 'var(--info-bg)',
+                                    borderRadius: 8,
+                                    border: '1px solid var(--info-border)',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                }}
+                            >
+                                <span
                                     style={{
-                                        marginBottom: 12,
-                                        padding: '8px 12px',
-                                        background: 'var(--info-bg)',
-                                        borderRadius: 8,
-                                        border: '1px solid var(--info-border)',
-                                        display: 'flex',
-                                        justifyContent: 'space-between',
+                                        fontSize: 13,
+                                        color: 'var(--info-text)',
+                                        fontWeight: 600,
                                     }}
                                 >
-                                    <span
-                                        style={{
-                                            fontSize: 13,
-                                            color: 'var(--info-text)',
-                                            fontWeight: 600,
-                                        }}
-                                    >
-                                        Downpayment Already Paid
-                                    </span>
-                                    <span
-                                        style={{
-                                            fontSize: 13,
-                                            color: 'var(--info-text)',
-                                            fontWeight: 700,
-                                        }}
-                                    >
-                                        −{' '}
-                                        {fmtPHP(checkoutModal.downpayment_paid)}
-                                    </span>
-                                </div>
-                            )}
+                                    Downpayment Already Paid
+                                </span>
+                                <span
+                                    style={{
+                                        fontSize: 13,
+                                        color: 'var(--info-text)',
+                                        fontWeight: 700,
+                                    }}
+                                >
+                                    −{' '}
+                                    {fmtPHP(checkoutComputed.downpaymentPaid)}
+                                </span>
+                            </div>
+                        )}
 
                         <div style={{ marginBottom: 12 }}>
                             <label
@@ -3630,12 +4013,12 @@ const Customers: React.FC = () => {
                             </label>
                             <div
                                 style={{
-                                    fontSize: 20,
+                                    fontSize: 22,
                                     fontWeight: 700,
                                     color: 'var(--success)',
                                 }}
                             >
-                                {fmtPHP(totalAfterDiscount)}
+                                {fmtPHP(checkoutComputed.totalAfterDiscount)}
                             </div>
                         </div>
 
@@ -3654,7 +4037,9 @@ const Customers: React.FC = () => {
                                 type="number"
                                 min={0}
                                 value={amountPaid}
-                                onChange={(e) => setAmountPaid(e.target.value)}
+                                onChange={(e) =>
+                                    setAmountPaid(e.target.value)
+                                }
                                 prefix="₱"
                             />
                         </div>
@@ -3683,12 +4068,12 @@ const Customers: React.FC = () => {
                             </div>
                         </div>
 
-                        {paid > 0 && (
+                        {checkoutComputed.paid > 0 && (
                             <div
                                 style={{
                                     padding: 12,
                                     background:
-                                        change >= 0
+                                        checkoutComputed.change >= 0
                                             ? 'var(--success-bg)'
                                             : 'var(--danger-bg)',
                                     borderRadius: 8,
@@ -3708,14 +4093,16 @@ const Customers: React.FC = () => {
                                         fontSize: 22,
                                         fontWeight: 700,
                                         color:
-                                            change >= 0
+                                            checkoutComputed.change >= 0
                                                 ? 'var(--success)'
                                                 : 'var(--danger)',
                                     }}
                                 >
-                                    {fmtPHP(Math.max(0, change))}
+                                    {fmtPHP(
+                                        Math.max(0, checkoutComputed.change),
+                                    )}
                                 </div>
-                                {change < 0 && (
+                                {checkoutComputed.change < 0 && (
                                     <div
                                         style={{
                                             fontSize: 11,
@@ -3724,7 +4111,9 @@ const Customers: React.FC = () => {
                                         }}
                                     >
                                         Insufficient — short by{' '}
-                                        {fmtPHP(Math.abs(change))}
+                                        {fmtPHP(
+                                            Math.abs(checkoutComputed.change),
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -3750,7 +4139,10 @@ const Customers: React.FC = () => {
                                 type="primary"
                                 loading={checkingOut}
                                 onClick={handleCheckout}
-                                disabled={!paid || change < 0}
+                                disabled={
+                                    !checkoutComputed.paid ||
+                                    checkoutComputed.change < 0
+                                }
                                 icon={<CheckCircleOutlined />}
                             >
                                 Confirm Check Out
@@ -3844,11 +4236,19 @@ const Customers: React.FC = () => {
                             </Descriptions.Item>
                             <Descriptions.Item label="Rate/Night">
                                 {fmtPHP(receiptModal.rate_per_night)}
+                                {receiptModal.discount_applied && (
+                                    <Tag
+                                        color="green"
+                                        style={{ marginLeft: 8 }}
+                                    >
+                                        Discounted
+                                    </Tag>
+                                )}
                             </Descriptions.Item>
                             <Descriptions.Item label="Subtotal">
                                 {fmtPHP(
                                     receiptModal.total_amount +
-                                        receiptModal.discount,
+                                    receiptModal.discount,
                                 )}
                             </Descriptions.Item>
                             <Descriptions.Item label="Discount">
@@ -3936,9 +4336,9 @@ const Customers: React.FC = () => {
                         </Descriptions.Item>
                         <Descriptions.Item label="Amount Paid">
                             ₱
-                            {(viewPaymentModal.downpayment_amount ?? 0).toFixed(
-                                2,
-                            )}
+                            {(
+                                viewPaymentModal.downpayment_amount ?? 0
+                            ).toFixed(2)}
                         </Descriptions.Item>
                         <Descriptions.Item label="Status">
                             <Tag
@@ -3961,7 +4361,9 @@ const Customers: React.FC = () => {
                                     {viewPaymentModal.downpayment_gcash_ref}
                                 </span>
                             ) : (
-                                <span style={{ color: 'var(--text-tertiary)' }}>
+                                <span
+                                    style={{ color: 'var(--text-tertiary)' }}
+                                >
                                     Not yet recorded
                                 </span>
                             )}
